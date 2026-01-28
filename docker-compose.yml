@@ -1,0 +1,145 @@
+version: '3.8'
+
+services:
+  ai-gateway:
+    build:
+      context: ./ai-gateway
+      dockerfile: Dockerfile
+    container_name: ai-gateway
+    ports:
+      - "9000:9000"
+    environment:
+      - AI_INTERNAL_SECRET=${AI_INTERNAL_SECRET}
+      - VLLM_DOLPHIN8B_URL=http://vllm-dolphin8b:8002
+      - LLAMA_CPU_URL=http://llama-cpu:8003
+      - VLLM_GPT20B_URL=http://vllm-gpt20b:8004
+      - AI_MAX_CONCURRENT_REQUESTS=16
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./logs/ai-gateway:/app/logs
+      - ./adapters:/adapters:ro  # LoRA 어댑터 마운트
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      vllm-dolphin8b:
+        condition: service_healthy
+      llama-cpu:
+        condition: service_healthy
+    networks:
+      - ai-network
+    restart: unless-stopped
+
+  vllm-dolphin8b:
+    build:
+      context: ./vllm-dolphin8b
+      dockerfile: Dockerfile
+    container_name: vllm-dolphin8b
+    ports:
+      - "8002:8002"
+    environment:
+      - MODEL_PATH=/models/dolphin2.9.4-llama3.1-8b
+      - CUDA_VISIBLE_DEVICES=0
+      - ENABLE_LORA=true
+      - LORA_ADAPTERS_DIR=/adapters
+    volumes:
+      - ${MODELS_VOLUME}:/models:ro
+      - ./adapters:/adapters:ro  # LoRA 어댑터 마운트
+      - ./logs/vllm-dolphin8b:/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    networks:
+      - ai-network
+    restart: unless-stopped
+
+  llama-cpu:
+    build:
+      context: ./llama-cpu
+      dockerfile: Dockerfile
+    container_name: llama-cpu
+    ports:
+      - "8003:8003"
+    environment:
+      - MODEL_PATH=/models/tiny-llama-1.1b
+      - N_THREADS=8
+    volumes:
+      - ${MODELS_VOLUME}:/models:ro
+      - ./logs/llama-cpu:/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - ai-network
+    restart: unless-stopped
+
+  # 선택: On-demand 모델 (기본적으로 중지 상태)
+  vllm-gpt20b:
+    build:
+      context: ./vllm-gpt20b
+      dockerfile: Dockerfile
+    container_name: vllm-gpt20b
+    ports:
+      - "8004:8004"
+    environment:
+      - MODEL_PATH=/models/gpt-oss-20b
+      - CUDA_VISIBLE_DEVICES=0
+    volumes:
+      - ${MODELS_VOLUME}:/models:ro
+      - ./logs/vllm-gpt20b:/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+    networks:
+      - ai-network
+    restart: "no"  # 수동 시작
+    profiles:
+      - on-demand
+
+networks:
+  ai-network:
+    driver: bridge
+
+volumes:
+  models-data:
+    driver: local
